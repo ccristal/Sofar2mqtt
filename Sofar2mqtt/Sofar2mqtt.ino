@@ -60,7 +60,7 @@ unsigned long lastMqttReconnectAttempt = 0;
 
 #define SOFAR_SLAVE_ID          0x01
 
-#define MAX_POWER		3000 //only used in peakshaving now
+#define MAX_POWER		3600     //only used in peakshaving now
 
 #define RS485_TRIES 40       // x 10mS to wait for RS485 input chars.
 
@@ -116,7 +116,7 @@ struct modbusResponse
   uint8_t dataSize;
   uint8_t frame[MAX_FRAME_SIZE];
   uint8_t frameSize;  
-  char* errorMessage;
+  const char* errorMessage;
 };
 
 bool modbusError = true;
@@ -1144,8 +1144,8 @@ void mqttCallback(String topic, byte *message, unsigned int length)
 
     modbusResponse rs;
     sendModbus(message, length, &rs);
-    char buffer[256];
-    buffer[256] = '\0';
+    static char buffer[3 * MAX_FRAME_SIZE + 1];  // "XX " per byte; static to keep it off the stack
+    buffer[0] = '\0';
     for (int j = 0; ((j < rs.frameSize)); j++) {
       sprintf(&buffer[3 * j], "%02X ", rs.frame[j]);
     }
@@ -1313,13 +1313,13 @@ void peakShaving()
       if (peakShavingBatteryPower > 0) {
         //charge
         if (peakShavingBatteryPower > MAX_POWER) {
-          peakShavingBatteryPower == MAX_POWER;
+          peakShavingBatteryPower = MAX_POWER;
         }
         sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_CHARGE, (uint16_t)peakShavingBatteryPower, "charge");
       } else if (peakShavingBatteryPower < 0) {
         //discharge
         if (peakShavingBatteryPower < (-1 * MAX_POWER)) {
-          peakShavingBatteryPower == (-1 * MAX_POWER);
+          peakShavingBatteryPower = (-1 * MAX_POWER);
         }
         sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_DISCHARGE, (uint16_t)(peakShavingBatteryPower * -1), "discharge");
       } else {
@@ -1348,13 +1348,13 @@ void selfuseMode()
       if (selfuseBatteryPower > 0) {
         //charge
         if (selfuseBatteryPower > MAX_POWER) {
-          selfuseBatteryPower == MAX_POWER;
+          selfuseBatteryPower = MAX_POWER;
         }
-        sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_CHARGE, (uint16_t)peakShavingBatteryPower, "charge");
+        sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_CHARGE, (uint16_t)selfuseBatteryPower, "charge");
       } else if (selfuseBatteryPower < 0) {
         //discharge
         if (selfuseBatteryPower < (-1 * MAX_POWER)) {
-          selfuseBatteryPower == (-1 * MAX_POWER);
+          selfuseBatteryPower = (-1 * MAX_POWER);
         }
         sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_DISCHARGE, (uint16_t)(selfuseBatteryPower * -1), "discharge");
       } else {
@@ -1476,7 +1476,7 @@ int listen(modbusResponse *resp)
   uint8_t		inFunctionCode = 0;
   uint8_t		inDataBytes = 0;
   int		done = 0;
-  modbusResponse	dummy;
+  static modbusResponse	dummy;   // static: keeps ~450 bytes off the stack
 
   if (!resp)
     resp = &dummy;      // Just in case we ever want to interpret here.
@@ -1623,18 +1623,17 @@ int sendPassiveCmdV2(uint8_t id, uint16_t cmd, int32_t param, String requestCmd)
   }
 
   char mqtt_topic[256];
-  sprintf_P(mqtt_topic, PSTR("%s/response/%s"), deviceName, requestCmd);
+  sprintf_P(mqtt_topic, PSTR("%s/response/%s"), deviceName, requestCmd.c_str());
   sendMqtt(mqtt_topic, retMsg);
   return err;
 }
 
 void sendMqtt(char* topic, String msg_str)
 {
-  char  msg[2000];
-
+  // Publish straight from the String: a 2000-byte stack copy here overflowed the
+  // 4KB ESP8266 stack when called from the MQTT callback (charge/discharge commands).
   mqtt.setBufferSize(2048);
-  msg_str.toCharArray(msg, msg_str.length() + 1); //packaging up the data to publish to mqtt
-  if (!(mqtt.publish(topic, msg)))
+  if (!(mqtt.publish(topic, msg_str.c_str())))
     printScreen("MQTT publish failed");
 }
 
@@ -1657,7 +1656,7 @@ int sendPassiveCmd(uint8_t id, uint16_t cmd, uint16_t param, String pubTopic)
   }
 
   char mqtt_topic[256];
-  sprintf_P(mqtt_topic, PSTR("%s/response/%s"), deviceName, pubTopic);
+  sprintf_P(mqtt_topic, PSTR("%s/response/%s"), deviceName, pubTopic.c_str());
   sendMqtt(mqtt_topic, retMsg);
   return err;
 }
