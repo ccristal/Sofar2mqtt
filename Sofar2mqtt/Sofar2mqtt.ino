@@ -98,6 +98,8 @@ unsigned int INVERTER_RUNNINGSTATE;
 
 // Battery Save mode is a hybrid mode where the battery will charge from excess solar but not discharge.
 bool BATTERYSAVE = false;
+// Last passive command battery save sent (0 = none yet), so unchanged commands aren't re-sent every cycle.
+uint16_t batterySaveLastCmd = 0;
 // Peakshaving will allow the inverter to charge or discharge the battery depending on a limited export or import power value, everything above will be go to or from battery
 bool PEAKSHAVING = false;
 // Selfusemode will allow the inverter to charge or discharge the battery depending on self usage (just like auto mode)
@@ -370,6 +372,7 @@ static struct mqtt_status_register  mqtt_status_reads[] =
 #define RUNSTATE_INTERVAL 5000
 #define SEND_INTERVAL 10000
 #define BATTERYSAVE_INTERVAL 3000
+#define BATTERYSAVE_REFRESH 300000 // re-send an unchanged battery save command every 5 min, in case one was missed
 #define PEAKSHAVING_INTERVAL 3000
 #define SELFUSE_INTERVAL 3000
 
@@ -1266,7 +1269,10 @@ void mqttCallback(String topic, byte *message, unsigned int length)
           if (messageBool)
             fnCode = SOFAR_FN_AUTO;
           else if (messageTemp == "battery_save")
+          {
             BATTERYSAVE = true;
+            batterySaveLastCmd = 0; // inverter state may have changed since; send on the next cycle
+          }
         }
         else if (messageValue > 0)
         {
@@ -1370,6 +1376,7 @@ void selfuseMode()
 void batterySave()
 {
   static unsigned long	lastRun = 0;
+  static unsigned long	lastSent = 0;
 
   if (checkTimer(&lastRun, BATTERYSAVE_INTERVAL) && BATTERYSAVE)
   {
@@ -1384,16 +1391,21 @@ void batterySave()
       // Switch to auto when any power flows to the grid.
       // We leave a little wriggle room because once you start charging the battery,
       // gridPower should be floating just above or below zero.
-      if ((p < 65535 / 2 || p > 65525) && (((inverterModel == ME3000) && (INVERTER_RUNNINGSTATE != 4)) || ((inverterModel == HYBRID) && (INVERTER_RUNNINGSTATE != 6))) )
-      {
-        //exporting to the grid
-        sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_AUTO, 0, "bsave_auto");
+      bool exporting = (p < 65535 / 2 || p > 65525) && (((inverterModel == ME3000) && (INVERTER_RUNNINGSTATE != 4)) || ((inverterModel == HYBRID) && (INVERTER_RUNNINGSTATE != 6)));
+      uint16_t wantCmd = exporting ? SOFAR_FN_AUTO : SOFAR_FN_STANDBY;
 
-      }
-      else
+      // Only write to the inverter when the command changes, plus a periodic refresh.
+      if ((wantCmd != batterySaveLastCmd) || (millis() - lastSent >= BATTERYSAVE_REFRESH))
       {
-        //importing from the grid
-        sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_STANDBY, SOFAR_PARAM_STANDBY, "bsave_standby");
+        int err;
+        if (exporting)
+          err = sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_AUTO, 0, "bsave_auto");        //exporting to the grid
+        else
+          err = sendPassiveCmd(SOFAR_SLAVE_ID, SOFAR_FN_STANDBY, SOFAR_PARAM_STANDBY, "bsave_standby"); //importing from the grid
+
+        // On failure leave lastCmd unset so the next cycle retries.
+        batterySaveLastCmd = (err == 0) ? wantCmd : 0;
+        lastSent = millis();
       }
     }
   }
